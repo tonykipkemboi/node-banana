@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState, useEffect, DragEvent } from "react";
+import { useCallback, useRef, useState, useEffect, DragEvent, useMemo } from "react";
 import {
   ReactFlow,
   Background,
@@ -12,6 +12,7 @@ import {
   Edge,
   useReactFlow,
   OnConnectEnd,
+  Node,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
@@ -29,6 +30,7 @@ import { ConnectionDropMenu, MenuAction } from "./ConnectionDropMenu";
 import { MultiSelectToolbar } from "./MultiSelectToolbar";
 import { EdgeToolbar } from "./EdgeToolbar";
 import { GlobalImageHistory } from "./GlobalImageHistory";
+import { GroupBackgroundsPortal, GroupControlsOverlay } from "./GroupsOverlay";
 import { NodeType, NanoBananaNodeData } from "@/types";
 import { detectAndSplitGrid } from "@/utils/gridSplitter";
 
@@ -95,7 +97,7 @@ interface ConnectionDropState {
 }
 
 export function WorkflowCanvas() {
-  const { nodes, edges, onNodesChange, onEdgesChange, onConnect, addNode, updateNodeData, loadWorkflow, getNodeById, addToGlobalHistory } =
+  const { nodes, edges, groups, onNodesChange, onEdgesChange, onConnect, addNode, updateNodeData, loadWorkflow, getNodeById, addToGlobalHistory, setNodeGroupId } =
     useWorkflowStore();
   const { screenToFlowPosition, getViewport } = useReactFlow();
   const [isDragOver, setIsDragOver] = useState(false);
@@ -103,6 +105,48 @@ export function WorkflowCanvas() {
   const [connectionDrop, setConnectionDrop] = useState<ConnectionDropState | null>(null);
   const [isSplitting, setIsSplitting] = useState(false);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
+
+  // Just pass regular nodes to React Flow - groups are rendered separately
+  const allNodes = useMemo(() => {
+    return nodes;
+  }, [nodes]);
+
+
+  // Check if a node was dropped into a group and add it to that group
+  const handleNodeDragStop = useCallback(
+    (_event: React.MouseEvent, node: Node) => {
+      // Skip if it's a group node
+      if (node.id.startsWith("group-")) return;
+
+      const nodeWidth = (node.style?.width as number) || 300;
+      const nodeHeight = (node.style?.height as number) || 280;
+      const nodeCenterX = node.position.x + nodeWidth / 2;
+      const nodeCenterY = node.position.y + nodeHeight / 2;
+
+      // Check if node center is inside any group
+      let targetGroupId: string | undefined;
+
+      for (const group of Object.values(groups)) {
+        const inBoundsX = nodeCenterX >= group.position.x && nodeCenterX <= group.position.x + group.size.width;
+        const inBoundsY = nodeCenterY >= group.position.y && nodeCenterY <= group.position.y + group.size.height;
+
+        if (inBoundsX && inBoundsY) {
+          targetGroupId = group.id;
+          break;
+        }
+      }
+
+      // Get current groupId of the node
+      const currentNode = nodes.find((n) => n.id === node.id);
+      const currentGroupId = currentNode?.groupId;
+
+      // Update groupId if it changed
+      if (targetGroupId !== currentGroupId) {
+        setNodeGroupId(node.id, targetGroupId);
+      }
+    },
+    [groups, nodes, setNodeGroupId]
+  );
 
   const handleConnect = useCallback(
     (connection: Connection) => {
@@ -475,6 +519,55 @@ export function WorkflowCanvas() {
         return;
       }
 
+      // Helper to get viewport center position in flow coordinates
+      const getViewportCenter = () => {
+        const viewport = getViewport();
+        const centerX = (-viewport.x + window.innerWidth / 2) / viewport.zoom;
+        const centerY = (-viewport.y + window.innerHeight / 2) / viewport.zoom;
+        return { centerX, centerY };
+      };
+
+      // Handle node creation hotkeys (Shift + key)
+      if (event.shiftKey && !event.ctrlKey && !event.metaKey) {
+        const key = event.key.toLowerCase();
+        let nodeType: NodeType | null = null;
+
+        switch (key) {
+          case "p":
+            nodeType = "prompt";
+            break;
+          case "i":
+            nodeType = "imageInput";
+            break;
+          case "g":
+            nodeType = "nanoBanana";
+            break;
+          case "l":
+            nodeType = "llmGenerate";
+            break;
+          case "a":
+            nodeType = "annotation";
+            break;
+        }
+
+        if (nodeType) {
+          event.preventDefault();
+          const { centerX, centerY } = getViewportCenter();
+          // Offset by half the default node dimensions to center it
+          const defaultDimensions: Record<NodeType, { width: number; height: number }> = {
+            imageInput: { width: 300, height: 280 },
+            annotation: { width: 300, height: 280 },
+            prompt: { width: 320, height: 220 },
+            nanoBanana: { width: 300, height: 300 },
+            llmGenerate: { width: 320, height: 360 },
+            output: { width: 320, height: 320 },
+          };
+          const dims = defaultDimensions[nodeType];
+          addNode(nodeType, { x: centerX - dims.width / 2, y: centerY - dims.height / 2 });
+          return;
+        }
+      }
+
       // Handle paste (Ctrl/Cmd + V)
       if ((event.ctrlKey || event.metaKey) && event.key === "v") {
         event.preventDefault();
@@ -486,14 +579,6 @@ export function WorkflowCanvas() {
           return;
         }
 
-        // Helper to get viewport center position in flow coordinates
-        const getViewportCenter = () => {
-          const viewport = getViewport();
-          const centerX = (-viewport.x + window.innerWidth / 2) / viewport.zoom;
-          const centerY = (-viewport.y + window.innerHeight / 2) / viewport.zoom;
-          return { centerX, centerY };
-        };
-
         // Check system clipboard for images first, then text
         navigator.clipboard.read().then(async (items) => {
           for (const item of items) {
@@ -504,7 +589,9 @@ export function WorkflowCanvas() {
               const reader = new FileReader();
               reader.onload = (e) => {
                 const dataUrl = e.target?.result as string;
-                const { centerX, centerY } = getViewportCenter();
+                const viewport = getViewport();
+                const centerX = (-viewport.x + window.innerWidth / 2) / viewport.zoom;
+                const centerY = (-viewport.y + window.innerHeight / 2) / viewport.zoom;
 
                 const img = new Image();
                 img.onload = () => {
@@ -527,7 +614,9 @@ export function WorkflowCanvas() {
               const blob = await item.getType('text/plain');
               const text = await blob.text();
               if (text.trim()) {
-                const { centerX, centerY } = getViewportCenter();
+                const viewport = getViewport();
+                const centerX = (-viewport.x + window.innerWidth / 2) / viewport.zoom;
+                const centerY = (-viewport.y + window.innerHeight / 2) / viewport.zoom;
                 // Prompt node default dimensions: 320x220
                 const nodeId = addNode("prompt", { x: centerX - 160, y: centerY - 110 });
                 updateNodeData(nodeId, { prompt: text });
@@ -825,12 +914,13 @@ export function WorkflowCanvas() {
       )}
 
       <ReactFlow
-        nodes={nodes}
+        nodes={allNodes}
         edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={handleConnect}
         onConnectEnd={handleConnectEnd}
+        onNodeDragStop={handleNodeDragStop}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         isValidConnection={isValidConnection}
@@ -847,6 +937,8 @@ export function WorkflowCanvas() {
           animated: false,
         }}
       >
+        <GroupBackgroundsPortal />
+        <GroupControlsOverlay />
         <Background color="#404040" gap={20} size={1} />
         <Controls className="bg-neutral-800 border border-neutral-700 rounded-lg shadow-lg [&>button]:bg-neutral-800 [&>button]:border-neutral-700 [&>button]:fill-neutral-300 [&>button:hover]:bg-neutral-700 [&>button:hover]:fill-neutral-100" />
         <MiniMap

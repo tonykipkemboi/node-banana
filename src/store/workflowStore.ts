@@ -21,6 +21,8 @@ import {
   WorkflowNodeData,
   ImageHistoryItem,
   WorkflowSaveConfig,
+  NodeGroup,
+  GroupColor,
 } from "@/types";
 import { useToast } from "@/components/Toast";
 
@@ -34,6 +36,7 @@ export interface WorkflowFile {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   edgeStyle: EdgeStyle;
+  groups?: Record<string, NodeGroup>;  // Optional for backward compatibility
 }
 
 // Clipboard data structure for copy/paste
@@ -47,6 +50,7 @@ interface WorkflowStore {
   edges: WorkflowEdge[];
   edgeStyle: EdgeStyle;
   clipboard: ClipboardData | null;
+  groups: Record<string, NodeGroup>;
 
   // Settings
   setEdgeStyle: (style: EdgeStyle) => void;
@@ -67,6 +71,15 @@ interface WorkflowStore {
   copySelectedNodes: () => void;
   pasteNodes: (offset?: XYPosition) => void;
   clearClipboard: () => void;
+
+  // Group operations
+  createGroup: (nodeIds: string[]) => string;
+  deleteGroup: (groupId: string) => void;
+  addNodesToGroup: (nodeIds: string[], groupId: string) => void;
+  removeNodesFromGroup: (nodeIds: string[]) => void;
+  updateGroup: (groupId: string, updates: Partial<NodeGroup>) => void;
+  moveGroupNodes: (groupId: string, delta: { x: number; y: number }) => void;
+  setNodeGroupId: (nodeId: string, groupId: string | undefined) => void;
 
   // Execution
   isRunning: boolean;
@@ -161,7 +174,22 @@ const createDefaultNodeData = (type: NodeType): WorkflowNodeData => {
 };
 
 let nodeIdCounter = 0;
+let groupIdCounter = 0;
 let autoSaveIntervalId: ReturnType<typeof setInterval> | null = null;
+
+// Group color palette (dark mode tints)
+export const GROUP_COLORS: Record<GroupColor, string> = {
+  neutral: "#262626",
+  blue: "#1e3a5f",
+  green: "#1a3d2e",
+  purple: "#2d2458",
+  orange: "#3d2a1a",
+  red: "#3d1a1a",
+};
+
+const GROUP_COLOR_ORDER: GroupColor[] = [
+  "neutral", "blue", "green", "purple", "orange", "red"
+];
 
 // localStorage helpers for auto-save configs
 const STORAGE_KEY = "node-banana-workflow-configs";
@@ -189,6 +217,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   edges: [],
   edgeStyle: "curved" as EdgeStyle,
   clipboard: null,
+  groups: {},
   isRunning: false,
   currentNodeId: null,
   pausedAtNodeId: null,
@@ -380,6 +409,152 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
 
   clearClipboard: () => {
     set({ clipboard: null });
+  },
+
+  // Group operations
+  createGroup: (nodeIds: string[]) => {
+    const { nodes, groups } = get();
+
+    if (nodeIds.length === 0) return "";
+
+    // Get the nodes to group
+    const nodesToGroup = nodes.filter((n) => nodeIds.includes(n.id));
+    if (nodesToGroup.length === 0) return "";
+
+    // Default dimensions per node type
+    const defaultNodeDimensions: Record<string, { width: number; height: number }> = {
+      imageInput: { width: 300, height: 280 },
+      annotation: { width: 300, height: 280 },
+      prompt: { width: 320, height: 220 },
+      nanoBanana: { width: 300, height: 300 },
+      llmGenerate: { width: 320, height: 360 },
+      output: { width: 320, height: 320 },
+    };
+
+    // Calculate bounding box of selected nodes
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    nodesToGroup.forEach((node) => {
+      // Use measured dimensions (actual rendered size) first, then style, then type-specific defaults
+      const defaults = defaultNodeDimensions[node.type] || { width: 300, height: 280 };
+      const width = node.measured?.width || (node.style?.width as number) || defaults.width;
+      const height = node.measured?.height || (node.style?.height as number) || defaults.height;
+
+      minX = Math.min(minX, node.position.x);
+      minY = Math.min(minY, node.position.y);
+      maxX = Math.max(maxX, node.position.x + width);
+      maxY = Math.max(maxY, node.position.y + height);
+    });
+
+    // Add padding around nodes
+    const padding = 20;
+    const headerHeight = 32; // Match HEADER_HEIGHT in GroupsOverlay
+
+    // Find next available color
+    const usedColors = new Set(Object.values(groups).map((g) => g.color));
+    let color: GroupColor = "neutral";
+    for (const c of GROUP_COLOR_ORDER) {
+      if (!usedColors.has(c)) {
+        color = c;
+        break;
+      }
+    }
+
+    // Generate ID and name
+    const id = `group-${++groupIdCounter}`;
+    const groupNumber = Object.keys(groups).length + 1;
+    const name = `Group ${groupNumber}`;
+
+    const newGroup: NodeGroup = {
+      id,
+      name,
+      color,
+      position: {
+        x: minX - padding,
+        y: minY - padding - headerHeight
+      },
+      size: {
+        width: maxX - minX + padding * 2,
+        height: maxY - minY + padding * 2 + headerHeight,
+      },
+    };
+
+    // Update nodes with groupId and add group
+    set((state) => ({
+      nodes: state.nodes.map((node) =>
+        nodeIds.includes(node.id) ? { ...node, groupId: id } : node
+      ) as WorkflowNode[],
+      groups: { ...state.groups, [id]: newGroup },
+      hasUnsavedChanges: true,
+    }));
+
+    return id;
+  },
+
+  deleteGroup: (groupId: string) => {
+    set((state) => {
+      const { [groupId]: _, ...remainingGroups } = state.groups;
+      return {
+        nodes: state.nodes.map((node) =>
+          node.groupId === groupId ? { ...node, groupId: undefined } : node
+        ) as WorkflowNode[],
+        groups: remainingGroups,
+        hasUnsavedChanges: true,
+      };
+    });
+  },
+
+  addNodesToGroup: (nodeIds: string[], groupId: string) => {
+    set((state) => ({
+      nodes: state.nodes.map((node) =>
+        nodeIds.includes(node.id) ? { ...node, groupId } : node
+      ) as WorkflowNode[],
+      hasUnsavedChanges: true,
+    }));
+  },
+
+  removeNodesFromGroup: (nodeIds: string[]) => {
+    set((state) => ({
+      nodes: state.nodes.map((node) =>
+        nodeIds.includes(node.id) ? { ...node, groupId: undefined } : node
+      ) as WorkflowNode[],
+      hasUnsavedChanges: true,
+    }));
+  },
+
+  updateGroup: (groupId: string, updates: Partial<NodeGroup>) => {
+    set((state) => ({
+      groups: {
+        ...state.groups,
+        [groupId]: { ...state.groups[groupId], ...updates },
+      },
+      hasUnsavedChanges: true,
+    }));
+  },
+
+  moveGroupNodes: (groupId: string, delta: { x: number; y: number }) => {
+    set((state) => ({
+      nodes: state.nodes.map((node) =>
+        node.groupId === groupId
+          ? {
+              ...node,
+              position: {
+                x: node.position.x + delta.x,
+                y: node.position.y + delta.y,
+              },
+            }
+          : node
+      ) as WorkflowNode[],
+      hasUnsavedChanges: true,
+    }));
+  },
+
+  setNodeGroupId: (nodeId: string, groupId: string | undefined) => {
+    set((state) => ({
+      nodes: state.nodes.map((node) =>
+        node.id === nodeId ? { ...node, groupId } : node
+      ) as WorkflowNode[],
+      hasUnsavedChanges: true,
+    }));
   },
 
   getNodeById: (id: string) => {
@@ -958,7 +1133,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   },
 
   saveWorkflow: (name?: string) => {
-    const { nodes, edges, edgeStyle } = get();
+    const { nodes, edges, edgeStyle, groups } = get();
 
     const workflow: WorkflowFile = {
       version: 1,
@@ -966,6 +1141,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
       nodes,
       edges,
       edgeStyle,
+      groups: Object.keys(groups).length > 0 ? groups : undefined,
     };
 
     const json = JSON.stringify(workflow, null, 2);
@@ -983,14 +1159,24 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
 
   loadWorkflow: (workflow: WorkflowFile) => {
     // Update nodeIdCounter to avoid ID collisions
-    const maxId = workflow.nodes.reduce((max, node) => {
+    const maxNodeId = workflow.nodes.reduce((max, node) => {
       const match = node.id.match(/-(\d+)$/);
       if (match) {
         return Math.max(max, parseInt(match[1], 10));
       }
       return max;
     }, 0);
-    nodeIdCounter = maxId;
+    nodeIdCounter = maxNodeId;
+
+    // Update groupIdCounter to avoid ID collisions
+    const maxGroupId = Object.keys(workflow.groups || {}).reduce((max, id) => {
+      const match = id.match(/-(\d+)$/);
+      if (match) {
+        return Math.max(max, parseInt(match[1], 10));
+      }
+      return max;
+    }, 0);
+    groupIdCounter = maxGroupId;
 
     // Look up saved config from localStorage (only if workflow has an ID)
     const configs = loadSaveConfigs();
@@ -1000,6 +1186,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
       nodes: workflow.nodes,
       edges: workflow.edges,
       edgeStyle: workflow.edgeStyle || "angular",
+      groups: workflow.groups || {},
       isRunning: false,
       currentNodeId: null,
       // Restore workflow ID and paths from localStorage if available
@@ -1016,6 +1203,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
     set({
       nodes: [],
       edges: [],
+      groups: {},
       isRunning: false,
       currentNodeId: null,
       // Reset auto-save state when clearing workflow
@@ -1079,6 +1267,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
       nodes,
       edges,
       edgeStyle,
+      groups,
       workflowId,
       workflowName,
       saveDirectoryPath,
@@ -1098,6 +1287,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
         nodes,
         edges,
         edgeStyle,
+        groups: Object.keys(groups).length > 0 ? groups : undefined,
       };
 
       const response = await fetch("/api/workflow", {

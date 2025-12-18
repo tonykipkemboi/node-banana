@@ -155,8 +155,10 @@ export type WorkflowNodeData =
   | LLMGenerateNodeData
   | OutputNodeData;
 
-// Workflow Node with typed data
-export type WorkflowNode = Node<WorkflowNodeData, NodeType>;
+// Workflow Node with typed data (extended with optional groupId)
+export type WorkflowNode = Node<WorkflowNodeData, NodeType> & {
+  groupId?: string;
+};
 
 // Workflow Edge Data
 export interface WorkflowEdgeData extends Record<string, unknown> {
@@ -219,4 +221,22 @@ export interface WorkflowSaveConfig {
   directoryPath: string;
   generationsPath: string | null;
   lastSavedAt: number | null;
+}
+
+// Group background color options (dark mode tints)
+export type GroupColor =
+  | "neutral"
+  | "blue"
+  | "green"
+  | "purple"
+  | "orange"
+  | "red";
+
+// Group definition stored in workflow
+export interface NodeGroup {
+  id: string;
+  name: string;
+  color: GroupColor;
+  position: { x: number; y: number };
+  size: { width: number; height: number };
 }
