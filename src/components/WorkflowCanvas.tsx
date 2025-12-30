@@ -124,9 +124,13 @@ const isMouseWheel = (event: WheelEvent): boolean => {
   // Mouse scroll wheel typically uses deltaMode 1 (lines) or has large discrete deltas
   if (event.deltaMode === 1) return true; 
 
-  // Fallback: larger, discrete delta values suggest a physical mouse wheel
+  // Fallback: larger, discrete delta values suggest a physical mouse wheel.
+  // 20px is chosen as a heuristic threshold to distinguish the smooth, small-delta
+  // scrolling of a macOS trackpad from the stepped deltas of a physical scroll wheel.
+  // Note: This is an approximation and might need tuning for specific hardware or 
+  // high-precision Windows trackpads which may emit different delta patterns.
   const absDeltaY = Math.abs(event.deltaY);
-  return absDeltaY >= 20 && absDeltaY % 1 === 0; // More generous threshold
+  return absDeltaY >= 20 && absDeltaY % 1 === 0;
 };
 
 // Check if an element can scroll and has room to scroll in the given direction
